@@ -1,40 +1,51 @@
 package dtls
 
 import (
+	"context"
+	"crypto/tls"
 	"fmt"
-	"net"
 	"testing"
 	"time"
 
+	"github.com/pion/dtls/v2/internal/net/dpipe"
+	"github.com/pion/dtls/v2/pkg/crypto/selfsign"
 	"github.com/pion/logging"
+	"github.com/pion/transport/test"
 )
 
 func TestSimpleReadWrite(t *testing.T) {
-	ca, cb := net.Pipe()
-	certificate, privateKey, err := GenerateSelfSigned()
+	report := test.CheckRoutines(t)
+	defer report()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ca, cb := dpipe.Pipe()
+	certificate, err := selfsign.GenerateSelfSigned()
 	if err != nil {
 		t.Fatal(err)
 	}
 	gotHello := make(chan struct{})
 
 	go func() {
-		server, sErr := testServer(cb, &Config{
-			Certificate:   certificate,
-			PrivateKey:    privateKey,
+		server, sErr := testServer(ctx, cb, &Config{
+			Certificates:  []tls.Certificate{certificate},
 			LoggerFactory: logging.NewDefaultLoggerFactory(),
 		}, false)
 		if sErr != nil {
-			t.Error(err)
+			t.Error(sErr)
 			return
 		}
 		buf := make([]byte, 1024)
 		if _, sErr = server.Read(buf); sErr != nil {
-			t.Error(err)
+			t.Error(sErr)
 		}
 		gotHello <- struct{}{}
+		if sErr = server.Close(); sErr != nil {
+			t.Error(sErr)
+		}
 	}()
 
-	client, err := testClient(ca, &Config{
+	client, err := testClient(ctx, ca, &Config{
 		LoggerFactory:      logging.NewDefaultLoggerFactory(),
 		InsecureSkipVerify: true,
 	}, false)
@@ -50,17 +61,22 @@ func TestSimpleReadWrite(t *testing.T) {
 	case <-time.After(time.Second * 5):
 		t.Error("timeout")
 	}
+
+	if err = client.Close(); err != nil {
+		t.Error(err)
+	}
 }
 
 func benchmarkConn(b *testing.B, n int64) {
 	b.Run(fmt.Sprintf("%d", n), func(b *testing.B) {
-		ca, cb := net.Pipe()
-		certificate, privateKey, err := GenerateSelfSigned()
+		ctx := context.Background()
+
+		ca, cb := dpipe.Pipe()
+		certificate, err := selfsign.GenerateSelfSigned()
 		server := make(chan *Conn)
 		go func() {
-			s, sErr := testServer(cb, &Config{
-				Certificate: certificate,
-				PrivateKey:  privateKey,
+			s, sErr := testServer(ctx, cb, &Config{
+				Certificates: []tls.Certificate{certificate},
 			}, false)
 			if err != nil {
 				b.Error(sErr)
@@ -75,7 +91,7 @@ func benchmarkConn(b *testing.B, n int64) {
 		b.ReportAllocs()
 		b.SetBytes(int64(len(hw)))
 		go func() {
-			client, cErr := testClient(ca, &Config{InsecureSkipVerify: true}, false)
+			client, cErr := testClient(ctx, ca, &Config{InsecureSkipVerify: true}, false)
 			if cErr != nil {
 				b.Error(err)
 			}
